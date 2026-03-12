@@ -1,92 +1,30 @@
 const express = require('express');
 const router = express.Router();
 const { dbAsync } = require('../database');
-const { analyzeEmotion, analyzeEmotionStream, getCacheStats, clearCache } = require('../services/llmService');
+const { analyzeEmotion } = require('../services/llmService');
 const { apiLimiter, analysisLimiter, journalCreationLimiter } = require('../middleware/rateLimiter');
 
-/**
- * @route   POST /api/journal
- * @desc    Create a new journal entry
- */
-router.post('/', journalCreationLimiter, async (req, res) => {
-  try {
-    const { userId, ambience, text } = req.body;
+// Debug: Log when routes are loaded
+console.log('✅ Loading journal routes...');
 
-    // Validation
-    if (!userId || !ambience || !text) {
-      return res.status(400).json({
-        error: 'Missing required fields',
-        required: ['userId', 'ambience', 'text'],
-        received: Object.keys(req.body)
-      });
-    }
-
-    if (text.length > 5000) {
-      return res.status(400).json({
-        error: 'Text too long',
-        maxLength: 5000,
-        received: text.length
-      });
-    }
-
-    const validAmbiences = ['forest', 'ocean', 'mountain', 'rain', 'desert', 'meadow'];
-    if (!validAmbiences.includes(ambience.toLowerCase())) {
-      return res.status(400).json({
-        error: 'Invalid ambience',
-        validValues: validAmbiences,
-        received: ambience
-      });
-    }
-
-    const result = await dbAsync.run(
-      `INSERT INTO journal_entries (userId, ambience, text) VALUES (?, ?, ?)`,
-      [userId, ambience.toLowerCase(), text]
-    );
-
-    const entry = await dbAsync.get(
-      `SELECT * FROM journal_entries WHERE id = ?`,
-      [result.id]
-    );
-
-    res.status(201).json({
-      success: true,
-      message: 'Journal entry created successfully',
-      data: {
-        id: entry.id,
-        userId: entry.userId,
-        ambience: entry.ambience,
-        text: entry.text,
-        created_at: entry.created_at
-      }
-    });
-
-  } catch (error) {
-    console.error('Error creating journal entry:', error);
-    res.status(500).json({
-      error: 'Failed to create journal entry',
-      message: error.message
-    });
-  }
+// Test route
+router.get('/test', (req, res) => {
+  res.json({ message: 'Journal API is working' });
 });
 
-/**
- * @route   GET /api/journal/:userId
- * @desc    Get all journal entries for a user
- */
+// GET /api/journal/:userId
 router.get('/:userId', apiLimiter, async (req, res) => {
+  console.log('GET /api/journal/:userId called with:', req.params.userId);
   try {
     const { userId } = req.params;
     const { limit = 50, offset = 0 } = req.query;
 
     const entries = await dbAsync.all(
-      `SELECT 
-        id, userId, ambience, text, 
-        emotion, keywords, summary,
-        created_at
-      FROM journal_entries 
-      WHERE userId = ? 
-      ORDER BY created_at DESC 
-      LIMIT ? OFFSET ?`,
+      `SELECT id, userId, ambience, text, emotion, keywords, summary, created_at
+       FROM journal_entries 
+       WHERE userId = ? 
+       ORDER BY created_at DESC 
+       LIMIT ? OFFSET ?`,
       [userId, parseInt(limit), parseInt(offset)]
     );
 
@@ -102,76 +40,72 @@ router.get('/:userId', apiLimiter, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error fetching journal entries:', error);
-    res.status(500).json({
-      error: 'Failed to fetch journal entries',
-      message: error.message
-    });
+    console.error('Error fetching entries:', error);
+    res.status(500).json({ error: 'Failed to fetch journal entries', message: error.message });
   }
 });
 
-/**
- * @route   POST /api/journal/analyze
- * @desc    Analyze emotions in text using LLM
- */
-router.post('/analyze', analysisLimiter, async (req, res) => {
+// POST /api/journal (create entry)
+router.post('/', journalCreationLimiter, async (req, res) => {
+  console.log('POST /api/journal called');
   try {
-    const { text, entryId, stream = false } = req.body;
+    const { userId, ambience, text } = req.body;
 
-    if (!text) {
-      return res.status(400).json({
-        error: 'Text is required for analysis'
-      });
+    if (!userId || !ambience || !text) {
+      return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    if (stream) {
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
+    const result = await dbAsync.run(
+      `INSERT INTO journal_entries (userId, ambience, text) VALUES (?, ?, ?)`,
+      [userId, ambience.toLowerCase(), text]
+    );
 
-      try {
-        await analyzeEmotionStream(text, (chunk) => {
-          res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-          
-          if (chunk.done && chunk.result && entryId) {
-            updateEntryAnalysis(entryId, chunk.result);
-          }
-        });
-        
-        res.write('data: [DONE]\n\n');
-        res.end();
-      } catch (streamError) {
-        res.write(`data: ${JSON.stringify({ error: streamError.message })}\n\n`);
-        res.end();
-      }
-      return;
+    const entry = await dbAsync.get(
+      `SELECT * FROM journal_entries WHERE id = ?`,
+      [result.id]
+    );
+
+    res.status(201).json({
+      success: true,
+      data: entry
+    });
+
+  } catch (error) {
+    console.error('Error creating entry:', error);
+    res.status(500).json({ error: 'Failed to create entry', message: error.message });
+  }
+});
+
+// POST /api/journal/analyze
+router.post('/analyze', analysisLimiter, async (req, res) => {
+  console.log('POST /api/journal/analyze called');
+  try {
+    const { text, entryId } = req.body;
+    
+    if (!text) {
+      return res.status(400).json({ error: 'Text is required' });
     }
 
     const analysis = await analyzeEmotion(text);
 
     if (entryId) {
-      await updateEntryAnalysis(entryId, analysis);
+      await dbAsync.run(
+        `UPDATE journal_entries SET emotion = ?, keywords = ?, summary = ? WHERE id = ?`,
+        [analysis.emotion, JSON.stringify(analysis.keywords), analysis.summary, entryId]
+      );
     }
 
-    res.json({
-      success: true,
-      data: analysis
-    });
+    res.json({ success: true, data: analysis });
 
   } catch (error) {
-    console.error('Error analyzing text:', error);
-    res.status(500).json({
-      error: 'Failed to analyze text',
-      message: error.message
-    });
+    console.error('Error analyzing:', error);
+    res.status(500).json({ error: 'Analysis failed', message: error.message });
   }
 });
 
-/**
- * @route   GET /api/journal/insights/:userId
- * @desc    Get insights about user's mental state over time
- */
+// GET /api/journal/insights/:userId
 router.get('/insights/:userId', apiLimiter, async (req, res) => {
+  console.log('GET /api/journal/insights/:userId called');
   try {
     const { userId } = req.params;
 
@@ -180,195 +114,57 @@ router.get('/insights/:userId', apiLimiter, async (req, res) => {
       [userId]
     );
 
-    const emotionResult = await dbAsync.get(
-      `SELECT emotion, COUNT(*) as count 
-       FROM journal_entries 
-       WHERE userId = ? AND emotion IS NOT NULL 
-       GROUP BY emotion 
-       ORDER BY count DESC 
-       LIMIT 1`,
-      [userId]
-    );
-
-    const ambienceResult = await dbAsync.get(
-      `SELECT ambience, COUNT(*) as count 
-       FROM journal_entries 
-       WHERE userId = ? 
-       GROUP BY ambience 
-       ORDER BY count DESC 
-       LIMIT 1`,
-      [userId]
-    );
-
-    const recentEntries = await dbAsync.all(
-      `SELECT keywords 
-       FROM journal_entries 
-       WHERE userId = ? AND keywords IS NOT NULL 
-       ORDER BY created_at DESC 
-       LIMIT 5`,
-      [userId]
-    );
-
-    const keywordFreq = {};
-    recentEntries.forEach(entry => {
-      try {
-        const keywords = JSON.parse(entry.keywords);
-        keywords.forEach(kw => {
-          keywordFreq[kw] = (keywordFreq[kw] || 0) + 1;
-        });
-      } catch (e) {}
-    });
-
-    const recentKeywords = Object.entries(keywordFreq)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 4)
-      .map(([kw]) => kw);
-
-    const emotionDistribution = await dbAsync.all(
-      `SELECT emotion, COUNT(*) as count 
-       FROM journal_entries 
-       WHERE userId = ? AND emotion IS NOT NULL 
-       GROUP BY emotion`,
-      [userId]
-    );
-
-    const weeklyTrend = await dbAsync.all(
-      `SELECT 
-        strftime('%Y-W%W', created_at) as week,
-        COUNT(*) as entries,
-        emotion
-       FROM journal_entries 
-       WHERE userId = ? AND created_at >= date('now', '-12 weeks')
-       GROUP BY week, emotion
-       ORDER BY week`,
-      [userId]
-    );
-
     res.json({
       success: true,
       data: {
         totalEntries: countResult?.total || 0,
-        topEmotion: emotionResult?.emotion || 'unknown',
-        emotionCount: emotionResult?.count || 0,
-        mostUsedAmbience: ambienceResult?.ambience || 'unknown',
-        ambienceCount: ambienceResult?.count || 0,
-        recentKeywords: recentKeywords.length > 0 ? recentKeywords : ['no data'],
-        emotionDistribution,
-        weeklyTrend: formatWeeklyTrend(weeklyTrend),
-        generatedAt: new Date().toISOString()
+        topEmotion: 'unknown',
+        recentKeywords: []
       }
     });
 
   } catch (error) {
-    console.error('Error generating insights:', error);
-    res.status(500).json({
-      error: 'Failed to generate insights',
-      message: error.message
-    });
+    console.error('Error getting insights:', error);
+    res.status(500).json({ error: 'Failed to get insights', message: error.message });
   }
 });
 
-/**
- * @route   POST /api/journal/:id/analyze
- * @desc    Analyze existing journal entry and save results
- */
+// POST /api/journal/:id/analyze
 router.post('/:id/analyze', analysisLimiter, async (req, res) => {
+  console.log('POST /api/journal/:id/analyze called');
   try {
     const { id } = req.params;
-
+    
     const entry = await dbAsync.get(
       `SELECT * FROM journal_entries WHERE id = ?`,
       [id]
     );
 
     if (!entry) {
-      return res.status(404).json({ error: 'Journal entry not found' });
+      return res.status(404).json({ error: 'Entry not found' });
     }
 
     const analysis = await analyzeEmotion(entry.text);
-    await updateEntryAnalysis(id, analysis);
+    
+    await dbAsync.run(
+      `UPDATE journal_entries SET emotion = ?, keywords = ?, summary = ? WHERE id = ?`,
+      [analysis.emotion, JSON.stringify(analysis.keywords), analysis.summary, id]
+    );
 
-    res.json({
-      success: true,
-      message: 'Entry analyzed successfully',
-      data: {
-        entryId: id,
-        analysis
-      }
-    });
+    res.json({ success: true, data: { entryId: id, analysis } });
 
   } catch (error) {
     console.error('Error analyzing entry:', error);
-    res.status(500).json({
-      error: 'Failed to analyze entry',
-      message: error.message
-    });
+    res.status(500).json({ error: 'Failed to analyze entry', message: error.message });
   }
 });
 
-/**
- * @route   GET /api/journal/cache/stats
- * @desc    Get LLM cache statistics
- */
-router.get('/cache/stats', async (req, res) => {
-  try {
-    const stats = getCacheStats();
-    res.json({ success: true, data: stats });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+// Debug: Log all registered routes
+console.log('📋 Journal routes registered:');
+router.stack.forEach(r => {
+  if (r.route) {
+    console.log(`   ${Object.keys(r.route.methods).join(',').toUpperCase()} ${r.route.path}`);
   }
 });
-
-/**
- * @route   POST /api/journal/cache/clear
- * @desc    Clear LLM analysis cache
- */
-router.post('/cache/clear', async (req, res) => {
-  try {
-    const result = clearCache();
-    res.json({
-      success: true,
-      message: 'Cache cleared successfully',
-      data: result
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Helper function to update entry analysis
-async function updateEntryAnalysis(entryId, analysis) {
-  try {
-    await dbAsync.run(
-      `UPDATE journal_entries 
-       SET emotion = ?, keywords = ?, summary = ? 
-       WHERE id = ?`,
-      [
-        analysis.emotion,
-        JSON.stringify(analysis.keywords),
-        analysis.summary,
-        entryId
-      ]
-    );
-    console.log(`✅ Updated entry ${entryId} with analysis`);
-  } catch (error) {
-    console.error(`❌ Failed to update entry ${entryId}:`, error);
-  }
-}
-
-// Helper to format weekly trend data
-function formatWeeklyTrend(rawData) {
-  const weeks = {};
-  
-  rawData.forEach(row => {
-    if (!weeks[row.week]) {
-      weeks[row.week] = { week: row.week, entries: 0, emotions: {} };
-    }
-    weeks[row.week].entries += row.entries;
-    weeks[row.week].emotions[row.emotion] = row.entries;
-  });
-
-  return Object.values(weeks).slice(-8);
-}
 
 module.exports = router;
