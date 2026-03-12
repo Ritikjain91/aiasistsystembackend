@@ -1,13 +1,55 @@
 const express = require('express');
 const router = express.Router();
-const { dbAsync } = require('../database');
+const { db } = require('../database');  // Get db directly for sync operations
 const { analyzeEmotion, analyzeEmotionStream, getCacheStats, clearCache } = require('../services/llmService');
 const { apiLimiter, analysisLimiter, journalCreationLimiter } = require('../middleware/rateLimiter');
 
+// Helper: Promisify db operations for consistency
+const dbAsync = {
+  run: (sql, params) => {
+    return new Promise((resolve, reject) => {
+      try {
+        const stmt = db.prepare(sql);
+        const result = stmt.run(...params);
+        resolve({ id: result.lastInsertRowid, changes: result.changes });
+      } catch (err) {
+        reject(err);
+      }
+    });
+  },
+  all: (sql, params) => {
+    return new Promise((resolve, reject) => {
+      try {
+        const stmt = db.prepare(sql);
+        const rows = stmt.all(...params);
+        resolve(rows);
+      } catch (err) {
+        reject(err);
+      }
+    });
+  },
+  get: (sql, params) => {
+    return new Promise((resolve, reject) => {
+      try {
+        const stmt = db.prepare(sql);
+        const row = stmt.get(...params);
+        resolve(row);
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+};
+
+/**
+ * @route   POST /api/journal
+ * @desc    Create a new journal entry
+ */
 router.post('/', journalCreationLimiter, async (req, res) => {
   try {
     const { userId, ambience, text } = req.body;
 
+    // Validation
     if (!userId || !ambience || !text) {
       return res.status(400).json({
         error: 'Missing required fields',
@@ -64,6 +106,10 @@ router.post('/', journalCreationLimiter, async (req, res) => {
   }
 });
 
+/**
+ * @route   GET /api/journal/:userId
+ * @desc    Get all journal entries for a user
+ */
 router.get('/:userId', apiLimiter, async (req, res) => {
   try {
     const { userId } = req.params;
@@ -101,6 +147,10 @@ router.get('/:userId', apiLimiter, async (req, res) => {
   }
 });
 
+/**
+ * @route   POST /api/journal/analyze
+ * @desc    Analyze emotions in text using LLM
+ */
 router.post('/analyze', analysisLimiter, async (req, res) => {
   try {
     const { text, entryId, stream = false } = req.body;
@@ -154,6 +204,10 @@ router.post('/analyze', analysisLimiter, async (req, res) => {
   }
 });
 
+/**
+ * @route   GET /api/journal/insights/:userId
+ * @desc    Get insights about user's mental state over time
+ */
 router.get('/insights/:userId', apiLimiter, async (req, res) => {
   try {
     const { userId } = req.params;
@@ -230,7 +284,7 @@ router.get('/insights/:userId', apiLimiter, async (req, res) => {
     res.json({
       success: true,
       data: {
-        totalEntries: countResult.total,
+        totalEntries: countResult?.total || 0,
         topEmotion: emotionResult?.emotion || 'unknown',
         emotionCount: emotionResult?.count || 0,
         mostUsedAmbience: ambienceResult?.ambience || 'unknown',
@@ -251,6 +305,10 @@ router.get('/insights/:userId', apiLimiter, async (req, res) => {
   }
 });
 
+/**
+ * @route   POST /api/journal/:id/analyze
+ * @desc    Analyze existing journal entry and save results
+ */
 router.post('/:id/analyze', analysisLimiter, async (req, res) => {
   try {
     const { id } = req.params;
@@ -285,6 +343,10 @@ router.post('/:id/analyze', analysisLimiter, async (req, res) => {
   }
 });
 
+/**
+ * @route   GET /api/journal/cache/stats
+ * @desc    Get LLM cache statistics
+ */
 router.get('/cache/stats', async (req, res) => {
   try {
     const stats = getCacheStats();
@@ -294,15 +356,24 @@ router.get('/cache/stats', async (req, res) => {
   }
 });
 
+/**
+ * @route   POST /api/journal/cache/clear
+ * @desc    Clear LLM analysis cache
+ */
 router.post('/cache/clear', async (req, res) => {
   try {
     const result = clearCache();
-    res.json({ success: true, message: 'Cache cleared successfully', data: result });
+    res.json({
+      success: true,
+      message: 'Cache cleared successfully',
+      data: result
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
+// Helper function to update entry analysis
 async function updateEntryAnalysis(entryId, analysis) {
   try {
     await dbAsync.run(
@@ -322,6 +393,7 @@ async function updateEntryAnalysis(entryId, analysis) {
   }
 }
 
+// Helper to format weekly trend data
 function formatWeeklyTrend(rawData) {
   const weeks = {};
   
