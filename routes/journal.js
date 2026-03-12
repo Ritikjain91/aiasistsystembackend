@@ -1,45 +1,8 @@
 const express = require('express');
 const router = express.Router();
-const { db } = require('../database');  // Get db directly for sync operations
+const { dbAsync } = require('../database');
 const { analyzeEmotion, analyzeEmotionStream, getCacheStats, clearCache } = require('../services/llmService');
 const { apiLimiter, analysisLimiter, journalCreationLimiter } = require('../middleware/rateLimiter');
-
-// Helper: Promisify db operations for consistency
-const dbAsync = {
-  run: (sql, params) => {
-    return new Promise((resolve, reject) => {
-      try {
-        const stmt = db.prepare(sql);
-        const result = stmt.run(...params);
-        resolve({ id: result.lastInsertRowid, changes: result.changes });
-      } catch (err) {
-        reject(err);
-      }
-    });
-  },
-  all: (sql, params) => {
-    return new Promise((resolve, reject) => {
-      try {
-        const stmt = db.prepare(sql);
-        const rows = stmt.all(...params);
-        resolve(rows);
-      } catch (err) {
-        reject(err);
-      }
-    });
-  },
-  get: (sql, params) => {
-    return new Promise((resolve, reject) => {
-      try {
-        const stmt = db.prepare(sql);
-        const row = stmt.get(...params);
-        resolve(row);
-      } catch (err) {
-        reject(err);
-      }
-    });
-  }
-};
 
 /**
  * @route   POST /api/journal
