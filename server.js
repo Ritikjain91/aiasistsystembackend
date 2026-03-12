@@ -14,6 +14,8 @@ const getAllowedOrigins = () => {
     'http://localhost:3000',
     'http://localhost:3001',
     'https://aiasistsystembackend.onrender.com',
+      'https://ai-assisted-journal-system-gilt.vercel.app'
+
   ];
   
   // Add any additional origins from env variable
