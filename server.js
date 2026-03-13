@@ -8,29 +8,28 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Dynamic CORS configuration
+// ─────────────────────────────────────────────────────────────
+// Allowed origins
+// ─────────────────────────────────────────────────────────────
 const getAllowedOrigins = () => {
   const origins = [
     'http://localhost:3000',
     'http://localhost:3001',
-    'https://aiasistsystembackend.onrender.com',
-      'https://ai-assisted-journal-system-gilt.vercel.app'
-
+    'https://ai-assisted-journal-system-gilt.vercel.app',
   ];
-  
-  // Add any additional origins from env variable
+
   if (process.env.ALLOWED_ORIGINS) {
-    origins.push(...process.env.ALLOWED_ORIGINS.split(','));
+    origins.push(...process.env.ALLOWED_ORIGINS.split(',').map((o) => o.trim()));
   }
-  
+
   return origins;
 };
 
 const corsOptions = {
   origin: (origin, callback) => {
-    // Allow requests with no origin (mobile apps, curl, etc.)
+    // Allow requests with no origin (mobile apps, Postman, curl, etc.)
     if (!origin) return callback(null, true);
-    
+
     const allowedOrigins = getAllowedOrigins();
     if (allowedOrigins.includes(origin)) {
       callback(null, true);
@@ -42,28 +41,46 @@ const corsOptions = {
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
   credentials: true,
-  maxAge: 86400, // 24 hours
+  maxAge: 86400, // cache preflight for 24 hours
 };
 
+// ─────────────────────────────────────────────────────────────
+// ✅ FIX 1: Handle OPTIONS preflight FIRST — before any other middleware
+// Without this, browsers never get a valid preflight response
+// ─────────────────────────────────────────────────────────────
+app.options('*', cors(corsOptions));
+
+// Apply CORS to all routes
 app.use(cors(corsOptions));
+
 app.use(express.json({ limit: '10mb' }));
 
-// Request logging middleware
+// Request logging
 app.use((req, res, next) => {
-  console.log(`${new Date().toISOString()} | ${req.method} ${req.path} | Origin: ${req.headers.origin || 'none'}`);
+  console.log(
+    `${new Date().toISOString()} | ${req.method} ${req.path} | Origin: ${req.headers.origin || 'none'}`
+  );
   next();
 });
 
+// ─────────────────────────────────────────────────────────────
+// Routes
+// ─────────────────────────────────────────────────────────────
 app.use('/api/journal', journalRoutes);
 
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
+// ✅ FIX 2: Health check available at BOTH /health AND /api/health
+// Frontend api.ts calls /api/health — this was silently 404-ing before
+const healthHandler = (req, res) => {
+  res.json({
+    status: 'ok',
     timestamp: new Date().toISOString(),
     env: process.env.NODE_ENV,
-    version: process.env.npm_package_version || '1.0.0'
+    version: process.env.npm_package_version || '1.0.0',
   });
-});
+};
+
+app.get('/health', healthHandler);
+app.get('/api/health', healthHandler); // ← was missing — caused waitForServer() to fail
 
 app.get('/', (req, res) => {
   res.json({
@@ -80,43 +97,47 @@ app.get('/', (req, res) => {
         insights: 'GET /api/journal/insights/:userId',
         cache: {
           stats: 'GET /api/journal/cache/stats',
-          clear: 'POST /api/journal/cache/clear'
-        }
-      }
+          clear: 'POST /api/journal/cache/clear',
+        },
+      },
     },
-    documentation: 'See README.md for full API documentation'
+    documentation: 'See README.md for full API documentation',
   });
 });
 
-// 404 handler
+// ─────────────────────────────────────────────────────────────
+// Error handlers
+// ─────────────────────────────────────────────────────────────
 app.use((req, res) => {
   res.status(404).json({
     error: 'Not Found',
     message: `Route ${req.method} ${req.path} not found`,
-    availableRoutes: ['/health', '/api/journal']
+    availableRoutes: ['/health', '/api/health', '/api/journal'],
   });
 });
 
-// Error handler
 app.use((err, req, res, next) => {
   console.error('❌ Error:', err.stack);
-  
+
   if (err.message === 'Not allowed by CORS') {
     return res.status(403).json({
       error: 'CORS Error',
       message: 'Origin not allowed',
-      origin: req.headers.origin
+      origin: req.headers.origin,
     });
   }
-  
-  res.status(500).json({ 
+
+  res.status(500).json({
     error: 'Internal Server Error',
-    message: process.env.NODE_ENV === 'development' ? err.message : 'Something went wrong!'
+    message: process.env.NODE_ENV === 'development' ? err.message : 'Something went wrong!',
   });
 });
 
+// ─────────────────────────────────────────────────────────────
+// Start
+// ─────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`🚀 ArvyaX Journal API Server running on port ${PORT}`);
+  console.log(`🚀 ArvyaX Journal API running on port ${PORT}`);
   console.log(`📚 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`🔗 Allowed Origins: ${getAllowedOrigins().join(', ')}`);
   console.log(`🤖 LLM Service: ${process.env.OPENROUTER_API_KEY ? 'Enabled' : 'Fallback Mode'}`);
